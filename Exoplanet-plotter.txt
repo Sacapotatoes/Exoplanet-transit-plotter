@@ -1,0 +1,292 @@
+from astropy.io import fits
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import os
+import warnings
+import julian
+from astropy import units as u
+from astropy.timeseries import BoxLeastSquares
+from astropy.timeseries import TimeSeries
+from astropy.utils.data import get_pkg_data_filename
+import matplotlib.pyplot as plt
+from astropy.stats import sigma_clipped_stats
+from astropy.timeseries import aggregate_downsample
+from astropy.table import Table
+from astropy.io import ascii
+import xlsxwriter
+from astropy.time import Time
+from math import pi
+from pylab import *
+import matplotlib
+import lightkurve as lk
+import openpyxl
+
+%matplotlib inline
+matplotlib.rcParams.update({'font.size': 14})
+
+warnings.simplefilter(action='ignore', category=Warning)
+save_results_to = 'C:/Users/thoma/Google Drive/Final Year Project/Figures/Python Plotsv2/'
+
+search_result = lk.search_lightcurve("wasp-104b", cadence="long")
+search_result
+
+klc = search_result[1].download()
+
+klc.scatter();
+
+flat_lc = klc.flatten(window_length=1001)
+flat_lc.scatter();
+
+mask = (flat_lc.time.value < 1346) | (flat_lc.time.value > 1350)
+masked_lc = flat_lc[mask]
+masked_lc.scatter();
+
+ax = flat_lc.errorbar()
+
+# Pass that axis to the next plot
+masked_lc.scatter(ax=ax, label='masked');
+
+clipped_lc = masked_lc.remove_outliers(sigma=8)
+clipped_lc.scatter(s=10);
+
+periodogram = clipped_lc.to_periodogram(method="bls", period=np.arange(1,10, 0.001))
+periodogram.plot();
+
+best_fit_period = periodogram.period_at_max_power
+print('Best fit period: {:.3f}'.format(best_fit_period))
+
+folded_lc = clipped_lc.fold(period=best_fit_period, epoch_time=periodogram.transit_time_at_max_power)
+folded_lc.scatter(s=10);
+
+binned_lc = folded_lc.bin(binsize=8)
+mask = (binned_lc.time.value < -1) | (binned_lc.time.value > -0.1)
+binned_lc2 = binned_lc[mask]
+
+mask = (binned_lc2.time.value < 0.1) | (binned_lc2.time.value > 1)
+binned_lc3 = binned_lc2[mask]
+
+binned_lc3.scatter(s=10);
+
+ax = binned_lc3.scatter(s=10)
+
+xlim = 0.1
+ylim = 0.0008
+#ax.set_ylim(-ylim+1,ylim+1)
+ax.set_xlim(-xlim,xlim)
+ax.set_title("Wasp-104b Kepler Data")
+
+#######################################################
+#My Data
+#File Location
+import_file_path = "D:\Dissertation Data\Comparison Data\Wasp-104b\Final Data.csv"
+
+#Open the AstroImageJ data, Strips unless data, converts J.D,-2400000 to UTC.
+
+#print(import_file_path)
+rawdata = pd.read_csv(import_file_path)
+df = pd.DataFrame(rawdata) #Save the Excel file into a DataFrame
+
+targetdata = df[['slice','J.D.-2400000','JD_UTC']] #Creates a DataFrame for targetdata
+observation_infomation = df[['slice','J.D.-2400000','JD_UTC','JD_SOBS','HJD_UTC','AIRMASS', 'ALT_OBJ','CCD-TEMP','EXPTIME','Source_Radius','Sky_Rad(min)','Sky_Rad(max)']] #Creates a DataFrame for Observation data
+
+Fluxdata =df.loc[:, df.columns.str.startswith("rel_flux_")] #Takes all columns with Sufix
+Fluxdata.drop(list(Fluxdata.filter(regex = 'SNR')), axis = 1, inplace = True) #Remove SNR Data column data
+#UTC TIME NOT RIGHT!!! 1 hour off at start but right at end. Spain is 1 hour ahead
+targetdata['J.D.-2400000'] -= 0.5 #Took away 0.5 from Modified Julian date due to mismatch, casuing the time to be 12 hours ahead.
+UTC_time = pd.DataFrame(targetdata.apply(lambda row: julian.from_jd(row['J.D.-2400000'], fmt='mjd'), axis=1)) #Takes Modified Julian and coverts to UTC
+UTC_time = UTC_time.set_axis(['UTC_Time'], axis=1, inplace=False) #Gives the DataFrame a title.
+Timeindays = UTC_time.copy()
+Timeindays['Period'] = ((pd.to_datetime(Timeindays['UTC_Time']).dt.day)+(pd.to_datetime(Timeindays['UTC_Time']).dt.hour/24)+(pd.to_datetime(Timeindays['UTC_Time']).dt.minute/1440)+(pd.to_datetime(Timeindays['UTC_Time']).dt.second/86400))
+
+
+X = pd.DataFrame((targetdata[targetdata['slice'] == 1]).index.tolist())
+X.loc[len(X+1)] = [(targetdata.slice.tail(1).index[0])]
+
+t=1
+j=0
+while j < (len(X) - 1):
+    top = X.iloc[j+1]
+    bot = X.iloc[j]
+    temp = Timeindays.Period.iloc[int(bot)]
+    while t < int(top):
+        Timeindays.Period.loc[t] = (Timeindays.Period.loc[t] - temp)
+        t=t+1
+    Timeindays.Period.iloc[0] = 0
+
+    j=j+1
+Timeindays.Period.loc[t] = (Timeindays.Period.loc[t] - temp)
+
+Timeindays = Timeindays.drop(Timeindays.columns[[0]], axis=1)
+Targetdata = pd.concat([targetdata,UTC_time, Timeindays, Fluxdata], ignore_index=False, axis=1) #Combinds Targetdata Dataframe with UTC_Time, delta time and Fluxdata.
+observation_infomation = pd.concat([observation_infomation, UTC_time], ignore_index=False, axis=1) #Combinds Targetdata Dataframe with UTC_Time and Fluxdata.
+
+#My Data
+#Saves Data into excel file.
+File_Name = "Detailed Table" #name of Excel File
+x=1 #Change to 1 to save file
+if (x == 1):
+    Location = str(os.path.dirname(import_file_path))+ '/' + str(File_Name) + '.xlsx'
+    File = pd.ExcelWriter(Location, engine='xlsxwriter') #Creates a variable with the Excel name and engine type.
+    Targetdata.to_excel(File, index=True, sheet_name='Star_Data') #Saves Targetdata Dataframe on the first sheet of the excel
+    observation_infomation.to_excel(File, index=True, sheet_name='Obs_Info') #Saves Observation_infomation ont he second sheet of the excel
+    File.save()
+
+#Turns PandaFrame into a Astropy Timeseries
+Mydatap = Targetdata[['UTC_Time','rel_flux_T1','rel_flux_err_T1']]
+Mydatap.rename(columns={'rel_flux_err_T1': 'Flux_Error'}, inplace=True)
+
+Mydatap.set_index('UTC_Time', inplace=True)
+Mydata = TimeSeries.from_pandas(Mydatap)
+Mydata.rename_column('rel_flux_T1', 'Flux')
+
+###############################################################
+#Change the Epoch and Period from results
+###############################################################
+
+Mydata_folded = Mydata.fold(period=1.755 *u.day, epoch_time='2021-03-14T23:30:00.00')
+
+matplotlib.rcParams.update({'errorbar.capsize': 2})
+plt.errorbar(Mydata_folded.time.jd , Mydata_folded['Flux'], yerr=Mydata_folded['Flux_Error'], fmt='o', markersize=5, capthick=1)
+plt.xlabel('Julian Date')
+plt.ylabel('Flux')
+
+#Applies binning to data
+mean, median, stddev = sigma_clipped_stats(Mydata['Flux'])  
+NormalisedBackground = 0.42 #Set Normalised Flux
+Mydata_folded['Flux_Norm'] = Mydata_folded['Flux'] / NormalisedBackground #median
+Mydata_bin = aggregate_downsample(Mydata_folded, time_bin_size=0.004 * u.day)  #Alter bin size here
+mean, median, stddev = sigma_clipped_stats(Mydata_folded['Flux_Norm'])  
+
+###############################################################
+#Change the background flux and it error
+###############################################################
+Mydata_bin['Flux_Norm_Error'] = (Mydata_bin['Flux_Norm'])*sqrt(((Mydata_bin['Flux_Error']/Mydata_bin['Flux'])**2)+((0.001043/0.420508)**2))
+
+f1 = plt.figure()
+f2 = plt.figure()
+
+ax1 = f1.add_subplot(111)
+ax1.plot(Mydata_folded.time.jd, Mydata_folded['Flux_Norm'], 'k.', markersize=2, color='black', label="Normalized Flux")
+ax1.errorbar(Mydata_bin.time_bin_start.jd ,Mydata_bin['Flux_Norm'], yerr=Mydata_bin['Flux_Norm_Error'], fmt='o', markersize=7, color='red', capthick=1, ecolor='blue', label="Binned Flux")
+ax1.set_ylabel('Normalized flux')
+ax1.legend(loc="upper left")
+
+ax2 = f2.add_subplot(111)
+ax2.plot(Mydata_bin.time_bin_start.jd, Mydata_bin['Flux_Norm'], color='red')
+ax2.set_xlabel('Time (days)')
+ax2.set_ylabel('Normalized flux')
+
+xlim = 0.1
+ylim = 0.0008
+
+f1 = plt.figure()
+f2 = plt.figure()
+
+#Tess Data
+ax1 = f1.add_subplot(111)
+ax1.title.set_text('Wasp-104b Compared')
+ax1.errorbar(Mydata_bin.time_bin_start.jd ,Mydata_bin['Flux_Norm'], yerr=Mydata_bin['Flux_Norm_Error'], fmt='o', markersize=7, color='red', capthick=1, ecolor='blue', label="My Data")
+ax1.scatter(binned_lc.time.jd,binned_lc['flux'], color='black', label="Kepler Data")
+
+ax1.set_xlabel('Time (days)')
+ax1.set_ylabel('Normalized flux')
+ax1.legend(loc="lower left")
+
+#ax.set_ylim(-ylim+1,ylim+1)
+ax1.set_xlim(-xlim,xlim)
+ax1.set_title("Wasp-104b Comparison Data")
+
+
+#################################################
+#AAVSO Data
+import_file_path = "C:\\Users\\thoma\\Google Drive\\Final Year Project\\Data\\Comparison Data\\Wasp-104b\\AAVSO\\Data 2\\Data\\0000176_Rnflux.txt"
+
+
+AAVSORaw = pd.read_csv(import_file_path)
+AAVSORaw.columns = AAVSORaw.columns.str.replace('\"','')
+AAVSORaw.columns = AAVSORaw.columns.str.replace(' ', '')
+
+UTC_time = pd.DataFrame(AAVSORaw.apply(lambda row: julian.from_jd(row['BJD_TDB'], fmt='jd'), axis=1)) #Takes Modified Julian and coverts to UTC
+UTC_time = UTC_time.set_axis(['UTC_Time'], axis=1, inplace=False) #Gives the DataFrame a title.
+AAVSORaw = pd.concat([UTC_time,AAVSORaw], ignore_index=False, axis=1) #Combinds Targetdata Dataframe with UTC_Time, delta time and Fluxdata.
+AAVSORaw = AAVSORaw.drop(columns=['BJD_TDB'])
+AAVSORaw.set_index('UTC_Time', inplace=True)
+
+AAVSOdata = TimeSeries.from_pandas(AAVSORaw)
+AAVSOdata.rename_column('Rnflux', 'Flux')
+
+AAVSOdata_folded = AAVSOdata.fold(period=1.7554137 *u.day, epoch_time='2019-04-02T07:00:00')
+
+matplotlib.rcParams.update({'errorbar.capsize': 2})
+plt.errorbar(AAVSOdata_folded.time.jd , AAVSOdata_folded['Flux'], yerr=AAVSOdata_folded['Error'], fmt='o', markersize=3, capthick=1)
+plt.xlabel('Time')
+plt.ylabel('Flux')
+
+#Applies binning to data
+mean, median, stddev = sigma_clipped_stats(AAVSOdata_folded['Flux'])  
+NormalisedBackground = 0.1005 #Set Normalised Flux
+AAVSOdata_folded['Flux_Norm'] = AAVSOdata_folded['Flux'] / NormalisedBackground #median
+AAVSOdata_bin = aggregate_downsample(AAVSOdata_folded, time_bin_size=0.0040 * u.day)  #Alter bin size here
+mean, median, stddev = sigma_clipped_stats(AAVSOdata_folded['Flux_Norm'])  
+
+###############################################################
+#Change the background flux and it error
+###############################################################
+AAVSOdata_bin['Flux_Norm_Error'] = (AAVSOdata_bin['Flux_Norm'])*sqrt(((AAVSOdata_bin['Error']/AAVSOdata_bin['Flux'])**2)+((0.000155094672214/1.00591387824)**2))*0.7
+
+f1 = plt.figure()
+f2 = plt.figure()
+
+ax1 = f1.add_subplot(111)
+ax1.title.set_text('Wasp-104b')
+#ax1.plot(AAVSOdata_bin.time.jd, AAVSOdata_folded['Flux_Norm'], 'k.', markersize=2, color='black', label="Flux")
+ax1.errorbar(AAVSOdata_bin.time_bin_start.jd ,AAVSOdata_bin['Flux_Norm'], yerr=AAVSOdata_bin['Flux_Norm_Error'], fmt='o', markersize=7, color='red', capthick=1, ecolor='blue', label="Binned Flux")
+ax1.set_xlabel('Time (days)')
+ax1.set_ylabel('Normalized flux')
+ax1.legend(loc="lower left")
+#ascii.write(AAVSOdata_folded, 'Wasp-104b.csv', format='csv')
+
+
+f1 = plt.figure()
+f2 = plt.figure()
+
+#Tess Data
+ax1 = f1.add_subplot(111)
+ax1.title.set_text('Wasp-104b Compared')
+ax1.errorbar(AAVSOdata_bin.time_bin_start.jd ,AAVSOdata_bin['Flux_Norm'], yerr=AAVSOdata_bin['Flux_Norm_Error'], fmt='o', markersize=4, color='black', capthick=0.8, ecolor='black', label="AAVSO Data")
+ax1.errorbar(Mydata_bin.time_bin_start.jd ,Mydata_bin['Flux_Norm'], yerr=Mydata_bin['Flux_Norm_Error'], fmt='o', markersize=7, color='red', capthick=1, ecolor='blue', label="My Data")
+
+
+ax2 = binned_lc3.errorbar(fmt='o', color='black', markersize=2, capthick=2, ecolor='black')
+ax2.set_title('Wasp-104b Compared')
+ax2.set_xlabel('Time (days)')
+ax2.set_ylabel('Normalized flux')
+ax2.set_xlim(-0.10,0.10)
+
+ax2 = errorbar(Mydata_bin.time_bin_start.jd ,Mydata_bin['Flux_Norm'], yerr=Mydata_bin['Flux_Norm_Error'], fmt='o', markersize=7, color='red', capthick=1, ecolor='blue', label="My Data")
+
+
+
+ax1.set_xlabel('Phase (JD)')
+ax1.set_ylabel('Flux [e- s^-1]')
+ax1.legend(loc="lower right")
+
+
+f1.savefig(save_results_to + 'Wasp-104b-Compare-AAVSO.png', dpi = 300, bbox_inches='tight')
+#f2.savefig(save_results_to + 'Wasp-104b-Compare-Line-Kepler.png', dpi = 300, bbox_inches='tight')
+
+AMagnitude = 0
+Mydata_bin['Magnitude'] = -2.5*np.log10(Mydata_bin['Flux_Norm']) + AMagnitude
+
+f1 = plt.figure()
+ax1 = f1.add_subplot(111)
+ax1.errorbar(Mydata_bin.time_bin_start.jd ,Mydata_bin['Magnitude'], yerr=Mydata_bin['Flux_Norm_Error'], fmt='o', markersize=7, color='red', capthick=1, ecolor='blue', label="My Data")
+ax1.invert_yaxis()
+ax1.title.set_text('Wasp-104b Relative Magnitude')
+ax1.set_xlabel('Phase (JD)')
+ax1.set_ylabel('Relative Magnitude')
+ax1.legend(loc="lower right")
+f1.savefig(save_results_to + 'Wasp-104b-Magnitude.png', dpi = 300, bbox_inches='tight')
+
+ascii.write(binned_lc3, 'Wasp-104b.csv', format='csv')
